@@ -681,7 +681,7 @@ if __name__ == "__main__":
         request = urllib.request.Request("https://raw.githubusercontent.com/ocvcoin/ocv_miner/main/version.txt")
         f = urllib.request.urlopen(request)
         resp = f.read()
-        if resp != CURRENT_MINER_VERSION:
+        if resp.decode('ascii') != CURRENT_MINER_VERSION:
             print("\nNew version is available.\n")
             print("\nTo update, visit: github.com/ocvcoin/ocv_miner\n")
     except:
