@@ -17,6 +17,7 @@ import secrets
 import numpy as np
 import cv2
 import platform
+import ssl
 
 CURRENT_MINER_VERSION = "1.0.0.0"
 
@@ -183,8 +184,9 @@ def rpc(method, params=None):
                 print("Retrying...")
                 if method != "submitblock":
                     time.sleep(2.4)
-                
-            f = urllib.request.urlopen(request)
+                    
+            sslfix_context = ssl._create_unverified_context()            
+            f = urllib.request.urlopen(request,context=sslfix_context)
             response = json.loads(f.read())
         except:
             print("An exception occurred") 
@@ -679,7 +681,8 @@ if __name__ == "__main__":
 ''')
     try:           
         request = urllib.request.Request("https://raw.githubusercontent.com/ocvcoin/ocv_miner/main/version.txt")
-        f = urllib.request.urlopen(request)
+        sslfix_context = ssl._create_unverified_context()        
+        f = urllib.request.urlopen(request,context=sslfix_context)
         resp = f.read()
         if resp.decode('ascii') != CURRENT_MINER_VERSION:
             print("\nNew version is available.\n")
