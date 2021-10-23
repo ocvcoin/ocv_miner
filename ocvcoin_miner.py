@@ -19,7 +19,7 @@ import cv2
 import platform
 import ssl
 
-CURRENT_MINER_VERSION = "1.0.0.0"
+CURRENT_MINER_VERSION = "1.0.0.1"
 
 
 # JSON-HTTP RPC Configuration
@@ -648,22 +648,25 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
 def standalone_miner(coinbase_message, address):
     global block_prepare_time
     while True:
-        block_prepare_time = time.time()
-        block_template = rpc_getblocktemplate()
+        try:
+            block_prepare_time = time.time()
+            block_template = rpc_getblocktemplate()
 
-        print("Mining block template, height {:d}...".format(block_template['height']))
-        mined_block, hash_rate = block_mine(block_template, coinbase_message, 0, address, timeout=5)
-        print("    {:.4f} KH/s\n".format(hash_rate / 1000.0))
+            print("Mining block template, height {:d}...".format(block_template['height']))
+            mined_block, hash_rate = block_mine(block_template, coinbase_message, 0, address, timeout=5)
+            print("    {:.4f} KH/s\n".format(hash_rate / 1000.0))
 
-        if mined_block:
-            print("Solved a block! Block hash: {}".format(mined_block['hash']))
-            submission = block_make_submit(mined_block)
+            if mined_block:
+                print("Solved a block! Block hash: {}".format(mined_block['hash']))
+                submission = block_make_submit(mined_block)
 
-            print("Submitting:", submission, "\n")
-            response = rpc_submitblock(submission)
-            if response is not None:
-                print("Submission Error: {}".format(response))
-                break
+                print("Submitting:", submission, "\n")
+                response = rpc_submitblock(submission)
+                if response is not None:
+                    print("Submission Error: {}".format(response))
+        except:
+            print("An exception occurred") 
+                
 
 
 if __name__ == "__main__":
