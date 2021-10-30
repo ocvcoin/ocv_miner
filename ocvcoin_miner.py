@@ -1,5 +1,4 @@
-# ntgbtminer - vsergeev - https://github.com/vsergeev/ntgbtminer
-# modified for ocvcoin
+#!/usr/bin/env python3
 
 import urllib.request
 import urllib.error
@@ -10,16 +9,42 @@ import hashlib
 import struct
 import random
 import time
-#import os
+import os
 import sys
-import bech32
+
 import secrets
 import numpy as np
 import cv2
 import platform
 import ssl
 
-CURRENT_MINER_VERSION = "1.0.0.1"
+
+from test_framework.segwit_addr import (
+    decode_segwit_address
+)
+from test_framework.blocktools import (
+    create_block,
+    NORMAL_GBT_REQUEST_PARAMS,
+    TIME_GENESIS_BLOCK,
+    script_BIP34_coinbase_height,
+    add_witness_commitment
+)
+from test_framework.messages import (
+    CBlock,
+    CBlockHeader,
+    BLOCK_HEADER_SIZE,
+)
+from test_framework.messages import (
+    CBlock,
+    COIN,
+    COutPoint,
+    CTransaction,
+    CTxIn,
+    CTxOut
+)
+
+
+CURRENT_MINER_VERSION = "1.2.0.0"
 
 
 # JSON-HTTP RPC Configuration
@@ -55,6 +80,31 @@ server=1
 
 If you have installed to ubuntu with autoinstall script, it is already active and you can write down the username and password given to you at the end of the installation. If you forgot, open /root/.ocvcoin/ocvcoin.conf and look.
 """
+
+def create_coinbase_via_bech32_addr(height, bech32_20byte_hash, coinbasevalue, extra_output_script=None):
+    
+    coinbase = CTransaction()
+    coinbase.vin.append(CTxIn(COutPoint(0, 0xffffffff), script_BIP34_coinbase_height(height), 0xffffffff))
+    coinbaseoutput = CTxOut()
+
+    coinbaseoutput.nValue = coinbasevalue
+    coinbaseoutput.scriptPubKey = b'\x00\x14'+bech32_20byte_hash
+    
+    coinbase.vout = [coinbaseoutput]
+    if extra_output_script is not None:
+        coinbaseoutput2 = CTxOut()
+        coinbaseoutput2.nValue = 0
+        coinbaseoutput2.scriptPubKey = extra_output_script
+        coinbase.vout.append(coinbaseoutput2)
+    coinbase.calc_sha256()
+    return coinbase
+def screen_clear():
+   # for mac and linux(here, os.name is 'posix')
+   if os.name == 'posix':
+      _ = os.system('clear')
+   else:
+      # for windows platfrom
+      _ = os.system('cls')
 
 block_prepare_time = 0
 def hash_block(block_data):
@@ -224,247 +274,6 @@ def rpc_submitblock(block_submission):
     return rpc("submitblock", [block_submission])
 
 
-################################################################################
-# Representation Conversion Utility Functions
-################################################################################
-
-
-def int2lehex(value, width):
-    """
-    Convert an unsigned integer to a little endian ASCII hex string.
-
-    Args:
-        value (int): value
-        width (int): byte width
-
-    Returns:
-        string: ASCII hex string
-    """
-
-    return value.to_bytes(width, byteorder='little').hex()
-
-
-def int2varinthex(value):
-    """
-    Convert an unsigned integer to little endian varint ASCII hex string.
-
-    Args:
-        value (int): value
-
-    Returns:
-        string: ASCII hex string
-    """
-
-    if value < 0xfd:
-        return int2lehex(value, 1)
-    elif value <= 0xffff:
-        return "fd" + int2lehex(value, 2)
-    elif value <= 0xffffffff:
-        return "fe" + int2lehex(value, 4)
-    else:
-        return "ff" + int2lehex(value, 8)
-
-
-def bitcoinaddress2hash160(addr):
-    """
-    Convert a Base58 Bitcoin address to its Hash-160 ASCII hex string.
-
-    Args:
-        addr (string): Base58 Bitcoin address
-
-    Returns:
-        string: Hash-160 ASCII hex string
-    """
-
-    table = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-
-    hash160 = 0
-    addr = addr[::-1]
-    for i, c in enumerate(addr):
-        hash160 += (58 ** i) * table.find(c)
-
-    # Convert number to 50-byte ASCII Hex string
-    hash160 = "{:050x}".format(hash160)
-
-    # Discard 1-byte network byte at beginning and 4-byte checksum at the end
-    return hash160[2:50 - 8]
-
-
-################################################################################
-# Transaction Coinbase and Hashing Functions
-################################################################################
-
-
-def tx_encode_coinbase_height(height):
-    """
-    Encode the coinbase height, as per BIP 34:
-    https://github.com/bitcoin/bips/blob/master/bip-0034.mediawiki
-
-    Arguments:
-        height (int): height of the mined block
-
-    Returns:
-        string: encoded height as an ASCII hex string
-    """
-
-    width = (height.bit_length() + 7) // 8
-
-    return bytes([width]).hex() + int2lehex(height, width)
-
-
-def tx_make_coinbase(coinbase_script, address, value, height):
-    """
-    Create a coinbase transaction.
-
-    Arguments:
-        coinbase_script (string): arbitrary script as an ASCII hex string
-        address (string): Base58 Bitcoin address
-        value (int): coinbase value
-        height (int): mined block height
-
-    Returns:
-        string: coinbase transaction as an ASCII hex string
-    """
-
-    # See https://en.bitcoin.it/wiki/Transaction
-
-    coinbase_script = tx_encode_coinbase_height(height) + coinbase_script
-
-    # Create a pubkey script
-    # OP_DUP OP_HASH160 <len to push> <pubkey> OP_EQUALVERIFY OP_CHECKSIG
-    #pubkey_script = "76" + "a9" + "14" + bitcoinaddress2hash160(address) + "88" + "ac"
-    
-    address_decoded = bech32.decode("ocv", address)
-    pubkey_script = "00" + "14" + bytes(address_decoded[1]).hex()   
-    
-
-    tx = ""
-    # version
-    tx += "01000000"
-    # in-counter
-    tx += "01"
-    # input[0] prev hash
-    tx += "0" * 64
-    # input[0] prev seqnum
-    tx += "ffffffff"
-    # input[0] script len
-    tx += int2varinthex(len(coinbase_script) // 2)
-    # input[0] script
-    tx += coinbase_script
-    # input[0] seqnum
-    tx += "ffffffff"
-    # out-counter
-    tx += "01"
-    # output[0] value
-    tx += int2lehex(value, 8)
-    # output[0] script len
-    tx += int2varinthex(len(pubkey_script) // 2)
-    # output[0] script
-    tx += pubkey_script
-    # lock-time
-    tx += "00000000"
-
-    return tx
-
-
-def tx_compute_hash(tx):
-    """
-    Compute the SHA256 double hash of a transaction.
-
-    Arguments:
-        tx (string): transaction data as an ASCII hex string
-
-    Return:
-        string: transaction hash as an ASCII hex string
-    """
-
-    return hashlib.sha256(hashlib.sha256(bytes.fromhex(tx)).digest()).digest()[::-1].hex()
-
-
-def tx_compute_merkle_root(tx_hashes):
-    """
-    Compute the Merkle Root of a list of transaction hashes.
-
-    Arguments:
-        tx_hashes (list): list of transaction hashes as ASCII hex strings
-
-    Returns:
-        string: merkle root as a big endian ASCII hex string
-    """
-
-    # Convert list of ASCII hex transaction hashes into bytes
-    tx_hashes = [bytes.fromhex(tx_hash)[::-1] for tx_hash in tx_hashes]
-
-    # Iteratively compute the merkle root hash
-    while len(tx_hashes) > 1:
-        # Duplicate last hash if the list is odd
-        if len(tx_hashes) % 2 != 0:
-            tx_hashes.append(tx_hashes[-1])
-
-        tx_hashes_new = []
-
-        for i in range(len(tx_hashes) // 2):
-            # Concatenate the next two
-            concat = tx_hashes.pop(0) + tx_hashes.pop(0)
-            # Hash them
-            concat_hash = hashlib.sha256(hashlib.sha256(concat).digest()).digest()
-            # Add them to our working list
-            tx_hashes_new.append(concat_hash)
-
-        tx_hashes = tx_hashes_new
-
-    # Format the root in big endian ascii hex
-    return tx_hashes[0][::-1].hex()
-
-
-################################################################################
-# Block Preparation Functions
-################################################################################
-
-
-def block_make_header(block):
-    """
-    Make the block header.
-
-    Arguments:
-        block (dict): block template
-
-    Returns:
-        bytes: block header
-    """
-
-    header = b""
-
-    # Version
-    header += struct.pack("<L", block['version'])
-    # Previous Block Hash
-    header += bytes.fromhex(block['previousblockhash'])[::-1]
-    # Merkle Root Hash
-    header += bytes.fromhex(block['merkleroot'])[::-1]
-    # Time
-    header += struct.pack("<L", block['curtime'])
-    # Target Bits
-    header += bytes.fromhex(block['bits'])[::-1]
-    # Nonce
-    header += struct.pack("<L", block['nonce'])
-
-    return header
-
-
-def block_compute_raw_hash(header):
-    """
-    Compute the raw SHA256 double hash of a block header.
-
-    Arguments:
-        header (bytes): block header
-
-    Returns:
-        bytes: block hash
-    """
-
-    return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1]
-
-
 def block_bits2target(bits):
     """
     Convert compressed target (block bits) encoding to target value.
@@ -491,81 +300,42 @@ def block_bits2target(bits):
     return target
 
 
-def block_make_submit(block):
-    """
-    Format a solved block into the ASCII hex submit format.
-
-    Arguments:
-        block (dict): block template with 'nonce' and 'hash' populated
-
-    Returns:
-        string: block submission as an ASCII hex string
-    """
-
-    submission = ""
-
-    # Block header
-    submission += block_make_header(block).hex()
-    # Number of transactions as a varint
-    submission += int2varinthex(len(block['transactions']))
-    # Concatenated transactions data
-    for tx in block['transactions']:
-        submission += tx['data']
-
-    return submission
-
-
-################################################################################
-# Block Miner
-################################################################################
-
-
-def block_mine(block_template, coinbase_message, extranonce_start, address, timeout=None, debugnonce_start=False):
+def block_mine(block_template, address, timeout=None):
 
     global block_prepare_time
-    """
-    Mine a block.
+    
+    
+    
+    
+    
 
-    Arguments:
-        block_template (dict): block template
-        coinbase_message (bytes): binary string for coinbase script
-        extranonce_start (int): extranonce offset for coinbase script
-        address (string): Base58 Bitcoin address for block reward
-
-    Timeout:
-        timeout (float): timeout in seconds
-        debugnonce_start (int): nonce start for testing purposes
-
-    Returns:
-        (block submission, hash rate) on success,
-        (None, hash rate) on timeout or nonce exhaustion.
-    """
-    # Add an empty coinbase transaction to the block template transactions
-    coinbase_tx = {}
     
     
     
-    
-    ## <Temporarily ignored transcations due to bad-txnmrklroot error. tx_compute_merkle_root should be fixed>
-    block_template['transactions'] = []
-    halvings = int(block_template['height'] / 210000);    
-    if halvings >= 64:
-        block_template['coinbasevalue'] = 0
-    else:	
-        nSubsidy = 5000000000    
-        nSubsidy = nSubsidy >> halvings		
-        block_template['coinbasevalue'] = nSubsidy;
-    ## </Temporarily ignored transcations due to bad-txnmrklroot error. tx_compute_merkle_root should be fixed>
-    
-    
-    
-    block_template['transactions'].insert(0, coinbase_tx)
-
-    # Add a nonce initialized to zero to the block template
-    block_template['nonce'] = 0
-
     # Compute the target hash
     target_hash = block_bits2target(block_template['bits'])
+    
+    
+    
+    txlist = []
+
+    for tx in block_template["transactions"]:
+        txlist.append(tx["data"])
+
+    
+    address_decoded = decode_segwit_address("ocv", address)
+  
+
+    coinbase = create_coinbase_via_bech32_addr(block_template["height"], bytes(address_decoded[1]), block_template["coinbasevalue"])
+
+    block = create_block( coinbase=coinbase,  tmpl=block_template, txlist=txlist)
+
+    add_witness_commitment(block)
+
+    new_block = block.serialize()
+    
+    block_header = new_block[0:80]
+    
 
     # Mark our mine start time
     time_start = time.time()
@@ -579,18 +349,10 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
     hash_rate, hash_rate_count = 0.0, 0
 
     # Loop through the extranonce
+    extranonce_start = 0
     extranonce = extranonce_start
     while extranonce <= 0xffffffff:
-        # Update the coinbase transaction with the new extra nonce
-        coinbase_script = ""
-        coinbase_tx['data'] = tx_make_coinbase(coinbase_script, address, block_template['coinbasevalue'], block_template['height'])
-        coinbase_tx['hash'] = tx_compute_hash(coinbase_tx['data'])
         
-        # Recompute the merkle root
-        block_template['merkleroot'] = tx_compute_merkle_root([tx['hash'] for tx in block_template['transactions']])
-
-        # Reform the block header
-        block_header = block_make_header(block_template)
         
         current_algo = (block_header[5] % 6) #from hashPrevBlock second byte
         print("Mining Algo: {}".format(current_algo))
@@ -599,7 +361,7 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
 
         # Loop through the nonce
         nonce_start = secrets.randbelow(0xffffffff)
-        nonce = nonce_start if not debugnonce_start else debugnonce_start
+        nonce = nonce_start
 
         #print(nonce)
         while nonce <= 0xffffffff:
@@ -615,9 +377,8 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
             
             # Check if it the block meets the target hash
             if block_hash < target_hash:
-                block_template['nonce'] = nonce
-                block_template['hash'] = block_hash.hex()
-                return (block_template, hash_rate)
+                
+                return (block_header+new_block[80:], hash_rate)
 
             # Measure hash rate and check timeout
             if nonce % 100 == 0 and nonce > nonce_start:
@@ -645,7 +406,7 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
 ################################################################################
 
 
-def standalone_miner(coinbase_message, address):
+def standalone_miner(address):
     global block_prepare_time
     while True:
         try:
@@ -653,25 +414,26 @@ def standalone_miner(coinbase_message, address):
             block_template = rpc_getblocktemplate()
 
             print("Mining block template, height {:d}...".format(block_template['height']))
-            mined_block, hash_rate = block_mine(block_template, coinbase_message, 0, address, timeout=5)
+            mined_block, hash_rate = block_mine(block_template, address, timeout=5)
             print("    {:.4f} KH/s\n".format(hash_rate / 1000.0))
 
-            if mined_block:
-                print("Solved a block! Block hash: {}".format(mined_block['hash']))
-                submission = block_make_submit(mined_block)
+            if mined_block != None:
+                
+                submission = mined_block.hex()     
 
-                print("Submitting:", submission, "\n")
+                print("Solved! Submitting:", submission, "\n")
                 response = rpc_submitblock(submission)
                 if response is not None:
                     print("Submission Error: {}".format(response))
-        except:
-            print("An exception occurred") 
+        except Exception as e:
+            print("Exception in standalone_miner loop:")
+            print(e) 
                 
 
 
 if __name__ == "__main__":
 
-    print ("\n\n\n\n")
+    screen_clear()
     print (
 '''
  ██████╗  ██████╗██╗   ██╗ ██████╗ ██████╗ ██╗███╗   ██╗
@@ -696,13 +458,13 @@ if __name__ == "__main__":
 
 
 
-    print("\n\nYou can try wallet.ocvcoin.com to create a wallet and get an address.\n\n")
+    print("\nYou can try wallet.ocvcoin.com to create a wallet and get an address.\n")
     if len(sys.argv) > 1:
         addr = sys.argv[1]
     else:           
-        addr = input("\n\nEnter your ocvcoin address:\n(you can right click & paste it)\n ")
+        addr = input("\nEnter your ocvcoin address:\n(you can right click & paste it)\n ")
     
-    if bech32.decode("ocv", addr) == (None, None):
+    if decode_segwit_address("ocv", addr) == (None, None):
         print("You entered the wrong address. Your address must be of bech32 type.")
         print("(It should start with ocv1)")
         exit()
@@ -746,4 +508,4 @@ if __name__ == "__main__":
     
     print("INITIAL TESTS SUCCESSFULLY COMPLETED")
         
-    standalone_miner("", addr)
+    standalone_miner(addr)
