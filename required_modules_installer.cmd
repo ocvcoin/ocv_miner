@@ -10,7 +10,7 @@ goto check_Permissions
 		
 		
 		pip3 install opencv-python==3.2.0.6 --force-reinstall
-		pip3 install bech32 --force-reinstall
+		
 		
 		
 		
