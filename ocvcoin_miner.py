@@ -17,7 +17,7 @@ import numpy as np
 import cv2
 import platform
 import ssl
-
+import multiprocessing
 
 from test_framework.segwit_addr import (
     decode_segwit_address
@@ -44,7 +44,7 @@ from test_framework.messages import (
 )
 
 
-CURRENT_MINER_VERSION = "1.2.0.0"
+CURRENT_MINER_VERSION = "1.5.0.0"
 
 
 # JSON-HTTP RPC Configuration
@@ -106,7 +106,7 @@ def screen_clear():
       # for windows platfrom
       _ = os.system('cls')
 
-block_prepare_time = 0
+
 def hash_block(block_data):
 
 
@@ -215,7 +215,7 @@ def rpc(method, params=None):
 
 
     if RPC_URL == "https://wallet.ocvcoin.com/OpenRPC.php":
-        if method == "getblocktemplate":
+        if method == "getblocktemplate" or method == "getbestblockhash":
             request = urllib.request.Request(RPC_URL+"?method="+method)
         else:
             request = urllib.request.Request(RPC_URL+"?method="+method, data)
@@ -229,7 +229,7 @@ def rpc(method, params=None):
         err_detected = False
         try:
             if mtries == 100:
-                print("Fetching...")
+                pass
             else:
                 print("Retrying...")
                 if method != "submitblock":
@@ -261,7 +261,11 @@ def rpc(method, params=None):
 ################################################################################
 # Bitcoin Daemon RPC Call Wrappers
 ################################################################################
-
+def rpc_getbestblockhash():
+    try:
+        return rpc("getbestblockhash")
+    except ValueError:
+        return {}
 
 def rpc_getblocktemplate():
     try:
@@ -300,17 +304,14 @@ def block_bits2target(bits):
     return target
 
 
-def block_mine(block_template, address, timeout=None):
-
-    global block_prepare_time
+def block_mine(block_template, address, cpu_index, cpuCount, event):       
     
     
+    nonce_start = (cpu_index * int(0xffffffff / cpuCount))
     
+    nonce_start = (nonce_start - (nonce_start % 1000))
     
-    
-
-    
-    
+    print("CPU{} NonceStart:{}".format(cpu_index,nonce_start))
     
     # Compute the target hash
     target_hash = block_bits2target(block_template['bits'])
@@ -334,101 +335,131 @@ def block_mine(block_template, address, timeout=None):
 
     new_block = block.serialize()
     
-    block_header = new_block[0:80]
+    block_header = new_block[0:80]  
+
+    current_algo = (block_header[5] % 6) #from hashPrevBlock second byte
+
     
+    last_time_stamp = time.time()
+    nonce = nonce_start
+    while nonce <= 0xffffffff:
+        # Update the block header with the new 32-bit nonce
+        block_header = block_header[0:76] + nonce.to_bytes(4, byteorder='little')
 
-    # Mark our mine start time
-    time_start = time.time()
-    if block_prepare_time > 0:
-        print("Prepare Time: {:.2f} second".format(time_start-block_prepare_time))
-    
-    block_prepare_time = time_start
-    
-
-    # Initialize our running average of hashes per second
-    hash_rate, hash_rate_count = 0.0, 0
-
-    # Loop through the extranonce
-    extranonce_start = 0
-    extranonce = extranonce_start
-    while extranonce <= 0xffffffff:
-        
-        
-        current_algo = (block_header[5] % 6) #from hashPrevBlock second byte
-        print("Mining Algo: {}".format(current_algo))
-
-        time_stamp = time.time()
-
-        # Loop through the nonce
-        nonce_start = secrets.randbelow(0xffffffff)
-        nonce = nonce_start
-
-        #print(nonce)
-        while nonce <= 0xffffffff:
-            # Update the block header with the new 32-bit nonce
-            block_header = block_header[0:76] + nonce.to_bytes(4, byteorder='little')
-
-            # Recompute the block hash
-            block_hash = hash_block(block_header)
-            new_algo = (block_hash[30] % 6)
+        # Recompute the block hash
+        block_hash = hash_block(block_header)           
             
-            
-            
-            
-            # Check if it the block meets the target hash
-            if block_hash < target_hash:
+        # Check if it the block meets the target hash
+        if block_hash < target_hash: 
+            submission = (block_header+new_block[80:]).hex()
+            print("Found! Submitting: {}\n".format(submission))
+            response = rpc_submitblock(submission)
+            if response is not None:
+                print("Submission Error: {}".format(response))
+                break
+			
+        if event.is_set():
+            break
+		
+        if nonce % 1000 == 0 and nonce > nonce_start:
+            current_timestamp = time.time()
+            diff = current_timestamp - last_time_stamp
+            if diff > 10:
+                hash_rate = int((nonce - nonce_start) / diff)
+                print("Mining Algo: {}, CPU{}: {} hash/s".format(current_algo,cpu_index, hash_rate))
+                nonce_start = nonce + 1
+                last_time_stamp = current_timestamp
                 
-                return (block_header+new_block[80:], hash_rate)
-
-            # Measure hash rate and check timeout
-            if nonce % 100 == 0 and nonce > nonce_start:
-                fuck_ZeroDivisionError = (time.time() - time_stamp)
                 
-                if fuck_ZeroDivisionError > 0:
-                    hash_rate = hash_rate + (((nonce - nonce_start) / fuck_ZeroDivisionError) - hash_rate) / (hash_rate_count + 1)
-                    hash_rate_count += 1
-                    nonce_start = nonce + 1
-                    time_stamp = time.time()
-
-                # If our mine time expired, return none
-                if timeout and (time_stamp - time_start) > timeout:
-                    return (None, hash_rate)
-
-            nonce += 1
-        extranonce += 1
-
-    # If we ran out of extra nonces, return none
-    return (None, hash_rate)
+            
+        nonce += 1
 
 
-################################################################################
-# Standalone Bitcoin Miner, Single-threaded
-################################################################################
+
+
+
+
 
 
 def standalone_miner(address):
-    global block_prepare_time
+    
+
+    
+
+    cpuCount = os.cpu_count()
+    
+    
+    print("\nNumber of CPU cores in the system: {}".format(cpuCount)) 
+
+    try:
+        if len(sys.argv) > 2:
+            process_count = int(sys.argv[2])
+        else:     
+            process_count = int(input("How many of these cores do you want to use?\n"))
+    except:    
+        process_count = 1
+    if process_count > cpuCount:
+        process_count = cpuCount
+    if process_count < 1:
+        process_count = 1
+    
+    print("\nSelected CPU cores: {}".format(process_count))
+    
+    block_template = rpc_getblocktemplate()
+    best_blockhash = block_template["previousblockhash"]
+    
+    
+    re_init_arr = True
+    proc_arr = []
+    event = multiprocessing.Event()
     while True:
         try:
-            block_prepare_time = time.time()
-            block_template = rpc_getblocktemplate()
 
-            print("Mining block template, height {:d}...".format(block_template['height']))
-            mined_block, hash_rate = block_mine(block_template, address, timeout=5)
-            print("    {:.4f} KH/s\n".format(hash_rate / 1000.0))
+            
+                    
+            if re_init_arr:
+                re_init_arr = False
+                print("Mining Block: {}".format(block_template["height"]))
+                event.clear()
+                for i in range(process_count):                    
+                    proc_arr.insert(i, multiprocessing.Process(target=block_mine, args=(block_template, address, i,cpuCount,event)))
+                    proc_arr[i].start()
+            time.sleep(1)
+            best_blockhash = rpc_getbestblockhash()
+            if block_template["previousblockhash"] != best_blockhash:
+                event.set()
+                for i in range(process_count):
+                    proc_arr[i].join()
+                try_count = 0
+                while True:
+                    if try_count > 0:
+                        print("RETRY {}: Fetching block template...".format(try_count))
+                        best_blockhash = rpc_getbestblockhash()
+                    else:
+                        print("Fetching block template...")
+                    block_template = rpc_getblocktemplate()
+                    if best_blockhash == block_template["previousblockhash"]:
+                        break
+                    else:
+                        time.sleep(1)
+                        try_count += 1
 
-            if mined_block != None:
                 
-                submission = mined_block.hex()     
 
-                print("Solved! Submitting:", submission, "\n")
-                response = rpc_submitblock(submission)
-                if response is not None:
-                    print("Submission Error: {}".format(response))
+                re_init_arr = True
+                
+
+                        
+            
         except Exception as e:
             print("Exception in standalone_miner loop:")
             print(e) 
-                
+            exc_type, exc_obj, exc_tb = sys.exc_info()
+            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            print(exc_type) 
+            print(fname) 
+            print(exc_tb.tb_lineno)
+            time.sleep(1)
 
 
 if __name__ == "__main__":
@@ -450,8 +481,8 @@ if __name__ == "__main__":
         f = urllib.request.urlopen(request,context=sslfix_context)
         resp = f.read()
         if resp.decode('ascii') != CURRENT_MINER_VERSION:
-            print("\nNew version is available.\n")
-            print("\nTo update, visit: github.com/ocvcoin/ocv_miner\n")
+            print("\nNew version is available.")
+            print("To update, visit: github.com/ocvcoin/ocv_miner\n")
     except:
         print("\nNew version check failed. Skipping...\n")
 
