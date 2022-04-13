@@ -2,4 +2,4 @@
 OCVCOIN'S MINER
 
 HOW TO MINING?
-https://youtu.be/6ADEtxtAEyQ
+https://youtu.be/fNamC3YEdFc
