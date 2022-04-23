@@ -2989,7 +2989,7 @@ if __name__ == "__main__":
         
             print("Test failed!")
             
-            print("This miner only works with x64 based processors")
+            print("This miner only works with 64-bit x86 based processors")
             print("This miner only works with opencv-python 3.2.0")
             
             
